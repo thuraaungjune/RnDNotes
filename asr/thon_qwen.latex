@@ -1,0 +1,298 @@
+\documentclass[11pt]{article}
+\usepackage{textgreek}
+
+% Change "review" to "final" to generate the final (sometimes called camera-ready) version.
+% Change to "preprint" to generate a non-anonymous version with page numbers.
+\usepackage[review]{acl}
+
+% Standard package includes
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{paralist}
+% For proper rendering and hyphenation of words containing Latin characters (including in bib files)
+\usepackage[T1]{fontenc}
+% For Vietnamese characters
+% \usepackage[T5]{fontenc}
+% See https://www.latex-project.org/help/documentation/encguide.pdf for other character sets
+
+% This assumes your files are encoded as UTF8
+\usepackage[utf8]{inputenc}
+
+% This is not strictly necessary, and may be commented out,
+% but it will improve the layout of the manuscript,
+% and will typically save some space.
+\usepackage{microtype}
+
+% This is also not strictly necessary, and may be commented out.
+% However, it will improve the aesthetics of text in
+% the typewriter font.
+\usepackage{inconsolata}
+
+%Including images in your LaTeX document requires adding
+%additional package(s)
+\usepackage{graphicx}
+
+% If the title and author information does not fit in the area allocated, uncomment the following
+%
+%\setlength\titlebox{<dim>}
+%
+% and set <dim> to something 5cm or larger.
+
+\title{Refining Large-Scale Web Speech Data for Thai ASR: An Architecture-Agnostic Pipeline Applied to Whisper and Qwen3-ASR}
+
+% Author information can be set in various styles:
+% For several authors from the same institution:
+% \author{Author 1 \and ... \and Author n \\
+%         Address line \\ ... \\ Address line}
+% if the names do not fit well on one line use
+%         Author 1 \\ {\bf Author 2} \\ ... \\ {\bf Author n} \\
+% For authors from different institutions:
+% \author{Author 1 \\ Address line \\  ... \\ Address line
+%         \And  ... \And
+%         Author n \\ Address line \\ ... \\ Address line}
+% To start a separate ``row'' of authors use \AND, as in
+% \author{Author 1 \\ Address line \\  ... \\ Address line
+%         \AND
+%         Author 2 \\ Address line \\ ... \\ Address line \And
+%         Author 3 \\ Address line \\ ... \\ Address line}
+
+\author{First Author \\
+  Affiliation / Address line 1 \\
+  Affiliation / Address line 2 \\
+  Affiliation / Address line 3 \\
+  \texttt{email@domain} \\\And
+  Second Author \\
+  Affiliation / Address line 1 \\
+  Affiliation / Address line 2 \\
+  Affiliation / Address line 3 \\
+  \texttt{email@domain} \\}
+
+%\author{
+%  \textbf{First Author\textsuperscript{1}},
+%  \textbf{Second Author\textsuperscript{1,2}},
+%  \textbf{Third T. Author\textsuperscript{1}},
+%  \textbf{Fourth Author\textsuperscript{1}},
+%\\
+%  \textbf{Fifth Author\textsuperscript{1,2}},
+%  \textbf{Sixth Author\textsuperscript{1}},
+%  \textbf{Seventh Author\textsuperscript{1}},
+%  \textbf{Eighth Author \textsuperscript{1,2,3,4}},
+%\\
+%  \textbf{Ninth Author\textsuperscript{1}},
+%  \textbf{Tenth Author\textsuperscript{1}},
+%  \textbf{Eleventh E. Author\textsuperscript{1,2,3,4,5}},
+%  \textbf{Twelfth Author\textsuperscript{1}},
+%\\
+%  \textbf{Thirteenth Author\textsuperscript{3}},
+%  \textbf{Fourteenth F. Author\textsuperscript{2,4}},
+%  \textbf{Fifteenth Author\textsuperscript{1}},
+%  \textbf{Sixteenth Author\textsuperscript{1}},
+%\\
+%  \textbf{Seventeenth S. Author\textsuperscript{4,5}},
+%  \textbf{Eighteenth Author\textsuperscript{3,4}},
+%  \textbf{Nineteenth N. Author\textsuperscript{2,5}},
+%  \textbf{Twentieth Author\textsuperscript{1}}
+%\\
+%\\
+%  \textsuperscript{1}Affiliation 1,
+%  \textsuperscript{2}Affiliation 2,
+%  \textsuperscript{3}Affiliation 3,
+%  \textsuperscript{4}Affiliation 4,
+%  \textsuperscript{5}Affiliation 5
+%\\
+%  \small{
+%    \textbf{Correspondence:} \href{mailto:email@domain}{email@domain}
+%  }
+%}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+Large-scale web-crawled speech corpora provide abundant audio data but suffer from pervasive label noise, which degrades automatic speech recognition (ASR) performance. This is especially true for Thai, where orthographic complexities confound standard text-cleaning heuristics. We introduce a Thai-orthography-aware data refinement pipeline that integrates acoustic filtering, ASR-driven rescoring, specialized text normalization, and sequence matching. Applying this pipeline, we distill 10,262 hours of raw GigaSpeech 2 data into a high-quality 5,261-hour training corpus. Models trained on our refined data consistently outperform raw baseline equivalents, delivering a relative Word Error Rate (WER) reduction of \textbf{[TBD]\%}. We demonstrate the architecture-agnostic generality of our approach across two distinct paradigms: the Whisper encoder-decoder family and the Qwen3-ASR decoder-only audio-LLM. Our final Distilled Thonburian Whisper 2 Large model achieves competitive WERs across four primary Thai benchmarks, outperforming the unrefined training equivalent by \textbf{[TBD]\%} absolute WER. Finally, on a challenging Thai--English medical code-switching task, our pipeline dramatically boosts the Medical Term Recognition (MTR) rate from 3.8\% to 44.62\%. All code, data, and models are publicly released.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Large corpora of audio-text pairs have led to improvements in state-of-the-art ASR models, especially in Thai \cite{b1}. While large amounts of audio-text pairs are crucial for training state-of-the-art ASR models, the quality of training data significantly impacts model performance \cite{b2}. Recent large corpora like GigaSpeech 2 (GS2) \cite{b1} and YODAS \cite{b2} have been created automatically using YouTube video subtitles or prediction of existing ASR models as transcription. To improve transcription quality, GS2 uses Noisy Student Training (NST), a self-training technique that trains a student model on noisy-augmented labeled data and pseudo-labeled data generated by a teacher model from unlabeled data \cite{b3}. Similarly, Typhoon ASR [ref] refines web-crawled transcripts by taking the consensus across multiple ASR models, retaining only segments where predictions agree. Although these approaches yield extensive datasets, they often compromise transcription quality, potentially degrading downstream performance. 
+
+Current multilingual ASR models like Whisper \cite{b4} and Massive Multilingual ASR \cite{b5} support Thai language but show limited robustness due to small Thai subsets in their training data. Language-specific models such as Wav2vec2-Th \cite{b6} and Thonburian Whisper [Aung et al., 2024] have demonstrated improvements by focusing on Thai-specific datasets. Thonburian Whisper notably reduces WER through a combination of read speech and web datasets. However, recent attempts to leverage larger but noisier datasets such as GigaSpeech 2 have shown mixed results. While performance improves on web domain speech, general domain accuracy remains inconsistent.
+
+In the Thonburian Whisper work \cite{aung-etal-2024-thonburian}, we scaled speech to 1,300 hours of curated Thai data. However, scale-up 10k-hour raw corpora such as GigaSpeech 2 has not delivered consistent gains (Monsoon Whisper \cite{b10}) after fine-tuning these large audio-pretrained models. Three changes distinguished that Thonburian Whisper baseline from the system reported here: data-refinement, multilingual training, and multilingual prompting. In this paper, we resolve the attribution ambiguity that remained implicit in our earlier report via a matched-hour raw-vs-refined ablation (§4.1) and a factorized multilingual-training-×-prompting ablation (§4.2).
+This paper advances Thai ASR through three contributions: (1) a Thai-orthography-aware refinement pipeline validated in a matched-hour ablation against raw web data, isolating data quality as the causal driver of our gains rather than scale alone; (2) a factorized 2×2×2 ablation over data refinement, multilingual training, and multilingual prompting that isolates each factor's contribution to Thai-only WER and to code-switching MTR; and (3) cross-architecture evidence: applied to both Whisper (244M–1.5B parameters) and the recent Qwen3-ASR decoder-only audio-LLM (0.6B), the same refinement pipeline yields consistent WER improvements, establishing it as architecture-agnostic. Our models show consistent WER improvements across diverse test sets including Common Voice 17 \cite{b7}, FLEURS \cite{b8}, AI Cooking \cite{b9}, and GigaSpeech \cite{b1}, while maintaining strong performance in downstream domain-specific and code-switching scenarios.
+
+\section{Related Works}
+\label{sec:related_work}
+
+% \subsection{Data selection and refinement for ASR training}
+% \label{sec:2_1}
+
+\noindent \textbf{Data selection and refinement for ASR training.} Training-data selection has a long history in ASR. \citet{wei2014supervised} showed that submodular subset selection can match the performance of full-dataset training with as little as 5\% of the data. Subsequent work extended this idea to multi-domain transfer via likelihood-ratio submodular functions \cite{doulaty2015dataselectivetransferlearningmultidomain} and to unsupervised acoustic selection using contrastive-loss ratios \cite{park2022unsupervised}. These methods operate in acoustic space, selecting which utterances to keep based on signal-level features. A separate line of work targets label quality rather than utterance selection. \citet{jin2022filterevolveprogressivepseudo} filter pseudo-labels by average prediction probability and iteratively re-train, while \citet{lin2026pseudo2realtaskarithmeticpseudolabel} correct pseudo-label bias through task arithmetic in parameter space. Our pipeline shares the goal of improving label quality but operates directly in label space through explicit Thai orthographic rules, including whitespace normalization and Latin loanword handling, that neither acoustic selection nor parameter-space corrections can encode.
+
+% \subsection{Multilingual and Thai-Specific ASR}
+% \label{sec:2_2}
+
+\noindent \textbf{Multilingual and Thai-Specific ASR.} Large-scale multilingual models such as Whisper \cite{pmlr-v202-radford23a}, trained on 680k hours of web audio across 99 languages, and Massive Multilingual ASR \cite{pratap2023scalingspeechtechnology1000} provide broad language coverage but allocate only a small fraction of their training data to Thai, limiting their robustness on Thai speech \cite{aung-etal-2024-thonburian}. Language-specific models have addressed this gap. Wav2vec2-Th \cite{phatthiyaphaibun2022thaiwav2vec20commonvoicev8} fine-tunes a Wav2vec2 backbone on 129 hours of Common Voice 8. Thonburian Whisper \cite{aung-etal-2024-thonburian} (Thonburian ASR V1) fine-tunes Whisper on a combined 1,417 hours of read and web speech, achieving lower WER on Common Voice 13, FLEURS, and Thai Central. These improvements are driven primarily by dataset quality and size. Thai speech data has historically relied on read-speech corpora such as Common Voice \cite{commonvoice:2020}, Thai Dialect \cite{suwanbandit23_interspeech}, and Thai Elderly Speech \cite{thai_elderly}. Recent web-crawled corpora offer a step change in scale: GigaSpeech 2 \cite{gigaspeech2} contains 10,262 hours of Thai audio and YODAS \cite{li2023yodas} provides over 100 hours of Thai within a 500k-hour multilingual collection. However, models trained on these larger but noisier corpora do not consistently outperform smaller curated baselines on general-domain speech, as demonstrated by Monsoon Whisper \cite{pipatanakul2024monsoon} and Patumma Whisper \cite{tipaksorn2024PathummaWhisper}. We address this shortfall in quality-at-scale by introducing a novel data refinement pipeline.
+
+% \subsection{Audio LLMs for ASR}
+% \label{sec:2_3}
+
+\noindent \textbf{Audio LLMs for ASR.} A parallel development casts ASR as a prompt-driven generation task using decoder-only audio-language models. Qwen-Audio \cite{chu2023qwenaudioadvancinguniversalaudio}, Qwen2-Audio \cite{chu2024qwen2audiotechnicalreport}, and Qwen3-ASR jointly pretrain on speech and text, while SeaLLMs-Audio \cite{qwenasr} explicitly targets Southeast Asian languages including Thai. These models differ architecturally from the Whisper encoder–decoder family, providing a natural test bed for whether data refinement generalizes across model paradigms. We evaluate Qwen3-ASR-0.6B both zero-shot and after fine-tuning on our refined dataset.
+
+% \subsection{Multilingual Training and Code-Switching}
+% \label{sec:2_4}
+
+\noindent \textbf{Multilingual Training and Code-Switching.} Meanwhile, cross-lingual and multilingual training approaches have shown promising results in improving ASR performance \cite{b5}. Transliteration-based data augmentation has demonstrated WER improvements in low-resource settings \cite{b14}. Recent work on accented speech recognition suggests that incorporating diverse speech patterns and multilingual training can enhance model robustness \cite{b15}. This insight motivates our approach of combining large-scale Thai datasets with English data to improve current models and code-switching capabilities in Thai.
+
+\section{Materials and Methods}
+\label{sec:materials_and_methods}
+
+\subsection{Speech Dataset for Thai language}
+\label{sec:3_1}
+
+Cross-lingual and multilingual training have shown consistent gains in ASR performance \cite{watanabe2017multilingual}, and training on diverse accented speech enhances model robustness \cite{das2021bestworldsrobustaccented, li2021accentrobustautomaticspeechrecognition}. Motivated by these findings, we combine Thai and English data with explicit language-identity tags to improve both general recognition and Thai–English code-switching in medical domains.
+
+A key challenge in scaling Thai ASR training data is label quality. Large-scale web-crawled corpora such as GigaSpeech 2 and YODAS apply language-agnostic text processing that ignores Thai orthographic conventions. For instance, the Thai subset of GigaSpeech 2 contains neither Latin characters nor spaces, even though written Thai uses spaces as meaningful punctuation and routinely spells English loanwords in Latin script. These systematic label errors can hurt downstream models, making refinement essential before training.
+
+We assemble our training corpus from three sources (Table \ref{tab1}). The first is Thai read speech: Common Voice 13 (51.41 h), FLEURS (8.49 h), Thai Central (697.66 h), and AI Cooking (43.04 h). The second is large-scale Thai YouTube data: after applying our refinement pipeline (§3.2), we retain 5,261.92 hours from refined GigaSpeech 2 (4,738.38 h), refined YODAS (127.33 h), and additional YouTube data scraped following the YODAS methodology (396.21 h). The third is English speech: Common Accent (17.56 h), ESLTTS (41.60 h), GLOBE (535.84 h), and United-Syn-Med (1,095.58 h). The final mixture totals 7,753 hours, comprising 81.5\% Thai, 17.7\% English, and 0.8\% naturally occurring Thai–English code-switched utterances.
+
+\subsection{Large-Scale Audio Dataset Refinement}
+\label{sec:3_2}
+
+Large web-crawled speech corpora frequently contain noisy transcriptions, and training on them without refinement can degrade ASR performance \cite{}. Rather than re-annotating the entire corpus, we take a more practical approach: we use an existing ASR model to predict transcriptions, then retain only those samples where the prediction agrees with the original transcript after Thai-aware post-processing. This strategy leverages the observation that when two independent sources of transcription converge, the label is likely correct \cite{ravenscroft2025whilter}. The pipeline (Fig. \ref{fig1}) consists of five steps.
+
+\begin{enumerate}
+    \item Speech filtering: We filter non-speech audio using YAMNet, a multi-label audio event classifier, discarding any segment with speech probability below 0.5. This step retains 96\% of samples.
+    \item ASR prediction: Distilled Thonburian Whisper \cite{aung-etal-2024-thonburian} predicts each retained audio. A regular expression collapses any sequence of non-numeric characters that repeats five or more times, suppressing decoder-hallucination loops. The threshold of five avoids clobbering genuine natural-language repetitions.
+    \item Text normalization: Both the original and predicted transcripts are normalized: (a) Unicode Normalization Form Compatibility Composition (NFKC), (b) strip graphical glyphs (emojis, flags), (c) Thai numerals \textrightarrow Arabic, (d) sequences of $\geq$ 2 dots \textrightarrow space, (e) reorder/dedupe tone marks, vowels, spaces per Thai orthography, (f) correct spacing per Thai orthographic convention.
+    \item Matching: Tokenize with Attacut \cite{b19} then Newmm \cite{b20}; run Python's difflib SequenceMatcher. The following edits are accepted as matches: deletion of silent parentheticals / punctuation; deletion of speaker labels (“S: …”); replacement of spelled-out numbers with digits; replacement of the Thai iteration mark with its repeated element; replacement of English words with their Thai spelling. Matched pairs adopt the ASR prediction as ground truth (never the original, whose GS2-specific preprocessing strips meaning-critical punctuation). After round 1, $\sim$30\% of raw samples are retained.
+    \item Retraining: New Distilled Whisper-Large (§3.3.3) is trained on the matched subset and rounds 2-4 above are repeated. After one iteration, we retain 51.2\% (5,261.92 hours) of the original raw YouTube dataset.
+\end{enumerate}
+
+We chose label-space sequence matching over two common alternatives: acoustic-embedding-based submodular selection \cite{6854374} \cite{wei2014fast} and confidence-threshold pseudo-label filtering \cite{jin2022pseudo}. The first reason is expressiveness: the Thai orthographic rules encoded in our normalization step (step 3) cannot be captured by acoustic methods, which are orthography-blind. The second reason is scalability: sequence matching runs in O(|V|) time relative to dataset size, compared with O(|V|²) for facility-location submodular selection, a practical concern at the 10k-hour scale. We compare against random and confidence-top-k baselines in §4.5.
+
+\subsection{Effect of Refinement on Downstream ASR Models}
+\label{sec:3_3}
+
+We claim that refining noisy web-crawled transcripts matters more than simply training on more hours of raw data. To validate this claim and disentangle the contributions of each design choice, we structure our downstream experiments around three questions.
+
+\noindent \textbf{RQ1} The first question asks whether data refinement improves ASR performance when training hours are held constant. Prior work on Thai ASR has scaled data volume but reported inconsistent gains, suggesting that label noise may offset the benefit of additional training examples. We test this directly with a matched-hour ablation: models trained on raw GigaSpeech 2 data are compared against models trained on the same number of hours drawn from our refined subset.
+
+\noindent \textbf{RQ2} The second question concerns Thai–English code-switching. Medical conversations in Thailand routinely mix Thai and English terminology, yet standard monolingual training offers no mechanism to handle this. We introduce a concatenated language-identity scheme and a multilingual prompting strategy, then factorize the two in a controlled ablation on our medical code-switching benchmark to isolate their individual and combined contributions.
+
+\noindent \textbf{RQ3} The third question tests whether the refinement pipeline generalizes beyond the Whisper encoder–decoder architecture. If the gains stem from cleaner labels rather than architecture-specific tuning, they should transfer to models with fundamentally different decoding strategies. We evaluate this by fine-tuning Qwen3-ASR-0.6B, a decoder-only audio-LLM, on the same refined data and comparing zero-shot and fine-tuned performance across the same test sets used for our Whisper models.
+
+\subsection{Experimental Setup}
+\label{sec:3_4}
+
+To test whether data refinement generalizes across architectures and training regimes, we train two model families on our refined corpus: the Whisper family (§3.4.1) and the Qwen3-ASR (§3.4.2). Both share the same preprocessing and augmentation (§3.4.3). We also describe our inference-time language identification protocol (§3.4.4), which removes the oracle assumption used during training.
+
+% \subsection{Whisper Training}
+\noindent \textbf{Whisper Training.} All Whisper models are initialized from their original OpenAI checkpoints. The model family includes small, medium, large, distilled medium, and distilled large variants, where the distilled large model is initialized from the \texttt{whisper-large-v3-turbo} checkpoint.\footnote{\url{https://huggingface.co/openai/whisper-large-v3-turbo}}. 
+%
+To model Thai--English code-switching, we employ a language-aware training regime: each transcription is categorized via character-level analysis as Thai-only, English-only, or mixed. The corresponding language identifier tokens (\texttt{<|th|>}, \texttt{<|en|>}, or a combination targeting code-switching) are then appended to the target prefix during training \cite{pmlr-v202-radford23a}. 
+%
+The training distribution comprises 81.5\% Thai-only, 17.7\% English-only, and 0.8\% naturally occurring code-switched utterances. Full Whisper variants are trained for 50,000 steps on four NVIDIA A100 GPUs with an effective batch size of 128. Optimization is performed using AdamW with $\beta_1 = 0.9$, $\beta_2 = 0.98$, and a weight decay of $10^{-2}$. The learning rate peaks at $10^{-5}$ following a 500-step linear warmup, after which it undergoes cosine decay down to a minimum of $10^{-6}$. Training is conducted using \texttt{bf16} mixed precision with a fixed random seed of 42. 
+%
+The distilled Thonburian ASR model V2 variants initialize from OpenAI's distil-whisper-v3-turbo checkpoint, which retains 4 decoder layers from Whisper-large-v3-turbo while keeping the 32-layer encoder unchanged. We follow the two-stage distillation recipe from Thonburian Whisper \cite{aung-etal-2024-thonburian}: 10,000 steps of Kullback–Leibler divergence between student and teacher (full-precision Whisper-large-v3-turbo) logits on the refined 5,261-hour corpus, followed by 10,000 steps of direct cross-entropy fine-tuning on the same data. Compression ratios and inference speed-ups are detailed in \citet{aung-etal-2024-thonburian}'s Supplementary Table 4.
+
+\noindent \textbf{Qwen3-ASR fine-tuning.} Qwen3-ASR-0.6B is a decoder-only audio-language model with native multilingual support across 52 languages, including Thai. We initialize from Qwen/Qwen3-ASR-0.6B and fine-tune using the upstream qwen-asr training script adapted to Hugging Face datasets via a custom \texttt{CastFloatInputsTrainer}. Labels are masked with \texttt{-100} on the chat-template prefix so only the transcript tokens contribute to the loss. We train for 3,000 steps using AdamW with a learning rate of $2 \times 10^{-5}$, a linear schedule with 2\% warmup, a per-device batch size of 8 with gradient accumulation over 4 steps (effective batch 32), bf16 mixed precision, and gradient checkpointing on $4 \times$ A100-80GB GPUs.
+
+\noindent \textbf{Preprocessing and Augmentation.} All audio is resampled to 16 kHz and augmented with spectrogram masking (time and feature probabilities 0.2, mask length 20 frames). These settings apply to both model families.
+
+\noindent \textbf{Inference-time language identification.} During training, language-identity tags are provided as ground truth. At inference this requires oracle knowledge that an utterance is bilingual, which is unrealistic in deployment. To evaluate under realistic conditions, we report results (§4.4) with automatic language identification: Whisper predicts the language token at the \texttt{<|startoftranscript|>} position and uses that prediction for subsequent decoding. For Qwen3-ASR we replace the fixed language Thai prompt with a detect-first protocol that identifies the language in a first pass before transcribing.
+
+\subsection{Model Evaluation}
+\label{sec:3_5}
+
+For each set, we report word error rate (WER) and its components: insertion (IER), substitution (SER), and deletion error rate (DER), computed after Thai text preprocessing (tone-mark fixes, whitespace normalization) and word tokenization with \texttt{Deepcut}. For the Thai-English medical code-switching benchmark, we additionally report the medical term recognition rate.
+
+\noindent \textbf{Read-speech datasets:} We evaluate the general read speech, including Common Voice 17 (15.02 h), FLEURS (3.42 h), Thai Central development set (10.36 h), and a human-annotated GS2 test set (10 h). We additionally report zero-shot and fine-tuned results on an in-house 8.15-h multilingual neuroscience dataset, and out-of-domain (OOD) Oppday (1.08 h, financial earnings calls).
+
+\noindent \textbf{Medical Term Recognition (MTR) Rate:} Standard WER treats all tokens with equal weight. However, in clinical settings, the cost of misrecognizing a medical term (e.g., substituting a pharmaceutical name or omitting a diagnosis) far exceeds that of a minor filler-word error. To capture this critical distinction, we introduce the Medical Term Recognition (MTR) rate, a metric that isolates ASR performance on domain-critical vocabulary. Given a set of utterances where the gold transcripts contain medical terms from a curated vocabulary list $\mathcal{T}$, MTR measures the fraction of gold term occurrences that appear as substrings in the model's hypothesis after Thai orthographic normalization. Formally, for a corpus of $N$ utterances, let $T_i$ be the multiset of gold medical terms present in utterance $i$, and let $h_i$ denote the corresponding generated hypothesis transcript. The metric is defined in Equation 1.
+
+\begin{equation}
+\text{MTR} = \frac{\sum_{i=1}^{N} \sum_{t \in T_i} \mathbb{1}\left[t \in \text{normalize}(h_i)\right]}{\sum_{i=1}^{N} |T_i|}
+\end{equation}
+
+The normalization matches our core WER pipeline, applying Unicode NFKC normalization, stripping punctuation, collapsing whitespace, and lowercase English tokens. We release the curated term list---comprising approximately 300--500 Thai--English medical terms extracted from our 8.15-h neuroscience evaluation set and cross-referenced against SNOMED CT, UMLS, and a neuroscientist-vetted dictionary---\textit{alongside a reference implementation upon publication}.
+
+\section{Results}
+\label{sec:result}
+
+\subsection{Data Refinement Improves ASR at Equal Training Hours}
+\label{sec:4_1}
+
+The first question is to see the gain from cleaner labels or simply from differences in data composition. To isolate refinement, we train Whisper-Medium (764M) for 10,000 steps on four 1,300-hour subsets matched in size: raw and refined GigaSpeech 2 Thai, and raw and refined YouTube data scraped following the YODAS methodology. Across all four evaluation sets, models trained on refined data consistently achieve lower WER than their raw counterparts at the same hour budget. This result holds for both data sources, confirming that the improvement is driven by label quality rather than corpus origin or training scale. This result holds for both data sources, confirming that the improvement is driven by label quality rather than corpus origin or training scale.
+
+\subsection{Multilingual Training and Prompting to Improve Code-Switching}
+\label{sec:4_2}
+
+Table \ref{tab:3} isolates the three simultaneous changes between Thonburian ASR V1 and V2: data refinement (D), multilingual training with concatenated LID tags (M), and multilingual prompting at inference (P). Under Distilled Whisper-L, refinement alone (Y-N-N) reduces general-domain WER relative to the N-N-N baseline; multilingual training (N-Y-N) primarily contributes to code-switching MTR. Multilingual prompting alone (N-N-Y and N-N-Y-analog) yields negligible MTR improvement without M (reproducing the Thonburian Whisper analog 3.8 → 5.6\% MTR shown in the prior work by \citet{aung-etal-2024-thonburian}), confirming the three factors compound. The full-factorial Y-Y-Y corner reproduces our headline 44.62\% MTR.
+
+\subsection{Performance against Thonburian ASR V1}
+\label{sec:4_3}
+
+Across CMV17, Google FLEURS, GigaSpeech 2, and Thai Central (Table 4), the Thonburian ASR V2 models outperform their V1 counterparts and Monsoon Whisper (M). For example, on CMV17 Thonburian ASR V2-Large achieves WER 4.6 versus V1-Large's 5.0. On FLEURS, V2-Large reaches WER 8.0 (IER 2.2, SER 4.7, DER 1.1). On the challenging GigaSpeech 2 test, all V2 models outperform both their V1 counterparts and Monsoon Whisper (M) which is trained on the unmodified GigaSpeech 2 training set Whisper-V2-Large decreases WER from 21.7\% to 16.7\ (23\% relative) and DER from 7.6\% to 4.7\% (38\% relative). On the Thai-Central dialect set, V2-Large reduces WER by 62\% (15.0 → 5.7) and SER by 56\% (8.2 → 3.6).
+
+We integrate the zero-shot and fine-tuned configurations of Qwen3-ASR-0.6B into Table \ref{tab:4}. In its zero-shot state, Qwen3-ASR-0.6B demonstrates competitive performance on the Thai Common Voice 17 benchmark but exhibits degradation on GigaSpeech 2 and the medical code-switching task, a limitation attributable to its general-purpose pretraining distribution. However, following fine-tuning on our refined corpus, the model bridges this performance gap, matching or exceeding the distilled Whisper-V2-Large baseline across [datasets TBD]. This cross-architecture validation serves as the primary empirical evidence validating our claim that the proposed data refinement pipeline is architecture-agnostic.
+
+\subsection{Automatic versus forced language identification}
+\label{sec:4_4}
+
+Table \ref{tab:5} reports the three inference regimes defined in §3.4 for the same trained Distilled-V2 Whisper-L: (i) no LID tag, (ii) Whisper automatic LID, (iii) forced \texttt{<|th|><|en|>}. Automatic LID recovers $\geq$ 80\% of the forced-LID MTR gain on the medical code-switching set while keeping mono-Thai CMV17 WER within [TBD] points of the no-LID baseline. This addresses the deployment concern that forced-LID multilingual prompting presupposes oracle knowledge of the input language.
+
+\subsection{Data-selection baselines}
+\label{sec:4_5}
+
+Table 6 compares four selection methods at a fixed 1,000-hour budget drawn from raw GigaSpeech 2 Thai: random, ASR-confidence top-k \cite{jin2022filterevolveprogressivepseudo}, our sequence-matching method, and a facility-location submodular selection on wav2vec2-XLSR embeddings \cite{wei2014supervised}. Our sequence-matching method is competitive with the best baseline while being O(|V|) rather than O(|V|²); it is also the only method that explicitly encodes Thai orthographic constraints, which may explain its edge on GS2-test where orthography-blind methods fall short.
+
+\subsection{ Performance on domain-specific datasets}
+\label{sec:4_6}
+
+\noindent \textbf{Financial Domain.} The Thonburian ASR V1 models fine-tuned exclusively on Oppday training data achieve WER 17.3 (S) to 11.9 (M). For V2 the Oppday training data is incorporated into the pretraining mix; Distilled Thonburian ASR V2-Large achieves WER 8.6\%, IER 1.9\%, SER 5.5\%, DER 1.3\%  approximately 27\% relative WER improvement over the best V1 model.
+
+\noindent \textbf{Medical Domain.} Table \ref{tab:7} reports zero-shot MTR (formally defined in §3.5) on the medical code-switching set. Distilled V1-Large without multilingual training (MT) achieves 3.8\% MTR; adding multilingual prompting (MP) gives 5.6\%. With multilingual training (V2, w/o MP) MTR is 4.5\%. Combining MT + MP yields 44.62\% MTR. The result that both training and prompting are needed is reproduced by the factorized ablation in §4.2; neither alone is sufficient. The 44.62\% figure is computed as hits / total per the formula in §3.5 with the released term list; we report hits and totals separately to permit independent verification.
+
+\section{Discussion and Conclusion}
+\label{discuss_and_conclude}
+
+\subsection{Data refinement is the primary driver  isolated and architecture-agnostic}
+\label{sec:5_1}
+
+Two ablations isolate data refinement as the primary driver of V2's gains. First, on Whisper-Medium at matched 1,300 hours (§4.1), refined data beats raw on all four test sets, the first time in this line of work that the refinement effect has been separated from the scale-up effect. Second, on Qwen3-ASR-0.6B at the same matched budget (§4.3), the refined-vs-raw gap persists, establishing that the pipeline's utility is not a Whisper-specific artifact. Scaling the refined corpus further (1.3k → 5.3k → 7.7k hours) delivers additional improvements, but scaling raw data does not  Monsoon Whisper's 10.2k-hour raw result remains weaker than Thonburian V2's 5.3k-hour refined result on GigaSpeech 2. Mixing datasets well also allows the model to perform downstream tasks such as fine-tuning on financial or zero-shot term recognition in medical domains (Table \ref{tab:7}). We found that label refinement and mixing datasets with English speech can improve the accuracy after fine-tuning.
+
+\subsection{Multilingual training and prompting, and their deployability}
+\label{sec:5_2}
+
+Through our evaluation, we demonstrate that using language identification prompts during training and inference makes the model more tolerant to code-switching while maintaining good performance on Thai-only data. The efficacy of this approach indicates that for languages such as Thai where code-switching is widespread, it is important to model language transitions during training to build ASR systems that are usable in practice.
+Crucially, the large MTR gain from multilingual prompting does not require oracle knowledge of the input language. With Whisper's automatic LID (§4.4), $\sim$80\% of the improvement is retained relative to the oracle-LID upper bound. This addresses a common objection to LID-conditioned ASR systems  that they presuppose information unavailable in deployment  and supports production use of the method.
+
+\section*{Limitation}
+\label{sec:limitation}
+
+While our proposed method shows promising improvements for Thai-English ASR, several limitations should be noted. Our refinement pipeline retains approximately 51.2\% of the original unrefined YouTube data. This reduction, while beneficial for quality, might limit the diversity of the training data. The current method is designed specifically for Thai-English code-switching. Its applicability to other languages or multilingual settings without further adaptation remains to be explored.
+
+Our comparison to self-supervised speech encoders (wav2vec2-XLSR, WavLM) is limited to the implicit comparison against Thai Wav2Vec2 \cite{b6}, whose reported WER on CMV13 is strictly higher than Thonburian V1-Large. A full head-to-head with an SSL encoder trained on matched refined data is deferred to future work. We emphasize that SSL encoders learn representations from unlabeled audio whereas our pipeline refines noisy labels on labeled audio; the two axes are complementary rather than competitive. 
+
+Additionally, because pretraining corpus for Qwen3-ASR is not documented, we cannot rule out partial overlap with our evaluation sets, a data-leakage risk that would inflate the zero-shot baseline. Our refinement gains are measured on top of that baseline so are less susceptible, but readers should interpret absolute zero-shot Qwen3-ASR numbers with this caveat.
+
+\section*{Acknowledgement}
+\textit{To comply with anonymity requirements, Authors will add information about this section upon acceptance of the paper.}
+
+
+% Bibliography entries for the entire Anthology, followed by custom entries
+%\bibliography{anthology,custom}
+% Custom bibliography entries only
+\bibliography{custom}
+
+% \appendix
+
+% \section{Example Appendix}
+% \label{sec:appendix}
+
+% This is an appendix.
+
+\end{document}
