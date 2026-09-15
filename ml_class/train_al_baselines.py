@@ -114,7 +114,24 @@ def extract_visual_diversity_features(model, inputs: Dict[str, Any]) -> np.ndarr
         )
 
     with torch.no_grad():
-        visual_tokens = vision_module(pixel_values, grid_thw=grid_thw)
+        vision_output = vision_module(pixel_values, grid_thw=grid_thw)
+
+    # Qwen2-VL / Qwen2.5-VL vision towers return the merged per-image tokens directly as a
+    # plain Tensor. Qwen3-VL's vision tower instead returns a BaseModelOutputWithDeepstackFeatures,
+    # whose `.pooler_output` (post spatial-merger) is the equivalent merged-token tensor -- its
+    # `.last_hidden_state` is the PRE-merge raw patch sequence and would break the merge_ratio
+    # math below (it stays at the raw patch count, so merge_ratio would come out as 1).
+    if isinstance(vision_output, torch.Tensor):
+        visual_tokens = vision_output
+    elif getattr(vision_output, "pooler_output", None) is not None:
+        visual_tokens = vision_output.pooler_output
+    elif hasattr(vision_output, "last_hidden_state"):
+        visual_tokens = vision_output.last_hidden_state
+    else:
+        raise AttributeError(
+            f"Vision module output of type {type(vision_output)} has neither `.pooler_output` nor "
+            "`.last_hidden_state` and is not a plain Tensor; update extract_visual_diversity_features."
+        )
 
     grid_thw_cpu = grid_thw.detach().cpu()
     raw_patch_counts = [int(t) * int(h) * int(w) for t, h, w in grid_thw_cpu.tolist()]
