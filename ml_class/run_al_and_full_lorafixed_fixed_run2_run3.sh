@@ -423,6 +423,104 @@ run_al_diva() {
 }
 
 # -------------------------------------------------------------------------
+# Phase 3b: DIVA Variant Sweep -- isolates each design lever (embedding space,
+# cluster granularity, budget-allocation rule) as its own tagged run, so they
+# can be compared against each other and against random/entropy/kmeans_center
+# on equal footing (same AL_ITERATIONS/SAMPLES_PER_ITER/epochs/seed).
+#
+# variant_label   what it changes vs. the dataset's default DIVA config
+#   visenc          diversity_embedding_type: vision_encoder (default DIVA uses
+#                   whatever $DIVERSITY_EMBED resolves to, usually "decoder")
+#   fixedquota      dynamic_quota OFF -- round-robin `alpha` picks per cluster,
+#                   instead of budget proportional to each cluster's mean uncertainty
+#   alpha1          alpha=1 -- maximum diversity (one line per cluster, more clusters)
+#   widebeta        beta doubled -- larger uncertain candidate pool feeds the
+#                   diversity clustering, instead of a tightly uncertainty-filtered one
+# -------------------------------------------------------------------------
+run_al_diva_variant() {
+    local target_ds="$1"
+    local variant_label="$2"
+    local embed_override="$3"     # "" = use $DIVERSITY_EMBED
+    local alpha_override="$4"     # "" = use dataset default
+    local beta_override="$5"      # "" = use dataset default
+    local use_dynamic_quota="$6"  # "1" or "0"
+    resolve_dataset_config "${target_ds}"
+
+    local embed_val=${embed_override:-${DIVERSITY_EMBED}}
+    local alpha_val=${alpha_override:-${DEFAULT_ALPHA}}
+    local beta_val=${beta_override:-${DEFAULT_BETA}}
+    local subset_val=${DEFAULT_SUBSET}
+
+    local OUTPUT_DIR="${SCRIPT_DIR}/models/${CUR_DS}_al_diva_${variant_label}_alpha${alpha_val}_seed${SEED}_${TAIL}"
+    local TRAIN_LOG="${SCRIPT_DIR}/logs/train_${CUR_DS}_al_diva_${variant_label}_alpha${alpha_val}_seed${SEED}_${TAIL}.log"
+
+    echo ""
+    echo "#########################################################################"
+    echo "DIVA Variant [${variant_label}]: ${CUR_DS} (Alpha=${alpha_val}, Beta=${beta_val}, Embed=${embed_val}, DynQuota=${use_dynamic_quota}) [Seed ${SEED}, Tail ${TAIL}]"
+    echo "#########################################################################"
+
+    if [ "${FORCE}" -ne 1 ] && [ -d "${OUTPUT_DIR}/iter_${AL_ITERATIONS}_model" ]; then
+        echo "DIVA variant [${variant_label}] for ${CUR_DS} already complete at ${OUTPUT_DIR}. Skipping."
+    else
+        if [ -d "${OUTPUT_DIR}" ] && [ ! -d "${OUTPUT_DIR}/iter_${AL_ITERATIONS}_model" ]; then
+            echo "Cleaning incomplete previous run at ${OUTPUT_DIR} for space..."
+            rm -rf "${OUTPUT_DIR}"
+        fi
+
+        local EXTRA_ARGS=()
+        if [ -n "${UNLABELED_DIR}" ] && [ -d "${UNLABELED_DIR}" ]; then
+            EXTRA_ARGS+=(--unlabeled_input_dir "${UNLABELED_DIR}")
+        else
+            EXTRA_ARGS+=(--initial_pool_size 10)
+        fi
+        if [ "${use_dynamic_quota}" -eq 1 ]; then
+            EXTRA_ARGS+=(--dynamic_quota)
+        fi
+
+        echo "Launching DIVA Variant [${variant_label}] on ${CUR_DS}..."
+        "$PYTHON_PATH" "${SCRIPT_DIR}/train_active_learning_extended.py" \
+            --model_id "${MODEL_ID}" \
+            --input_dir "${INPUT_DIR}" \
+            "${EXTRA_ARGS[@]}" \
+            --output_dir "${OUTPUT_DIR}" \
+            --prompt_path "${PROMPT_PATH}" \
+            --aug_test_dir "${TEST_DIR}" \
+            --al_strategy "vis_div" \
+            --alpha ${alpha_val} \
+            --beta ${beta_val} \
+            --al_eval_subset ${subset_val} \
+            --al_iterations ${AL_ITERATIONS} \
+            --samples_per_iter ${SAMPLES_PER_ITER} \
+            --tuning_mode "${TUNING_MODE}" \
+            --target_modules ${LORA_TARGETS} \
+            --diversity_embedding_type "${embed_val}" \
+            --lr ${LR} \
+            --batch_size ${BATCH_SIZE} \
+            --gradient_accumulation_steps ${GRAD_ACCUM} \
+            --epochs ${AL_EPOCHS} \
+            --freeze_vision_encoder \
+            --seed ${SEED} \
+            > "${TRAIN_LOG}" 2>&1
+
+        local exit_code=$?
+        if [ ${exit_code} -ne 0 ]; then
+            echo "ERROR: DIVA variant [${variant_label}] failed for ${CUR_DS}! Check: ${TRAIN_LOG}"
+            return 1
+        fi
+
+        rm -rf "${OUTPUT_DIR}/trainer_tmp" 2>/dev/null
+
+        if [ "${PRUNE_INTERMEDIATE}" -eq 1 ]; then
+            for ((it=0; it<AL_ITERATIONS; it++)); do
+                rm -rf "${OUTPUT_DIR}/iter_${it}_model" 2>/dev/null
+            done
+        fi
+
+        echo "DIVA variant [${variant_label}] on ${CUR_DS} completed successfully."
+    fi
+}
+
+# -------------------------------------------------------------------------
 # Multi-GPU Parallel Task Queue Runner
 # -------------------------------------------------------------------------
 run_parallel_task_queue() {
@@ -587,6 +685,16 @@ case "${MODE}" in
     "parallel_diva")
         run_parallel_task_queue "himanis_diva" "belfort_diva" "esposalles_diva"
         ;;
+    "diva_sweep")
+        # Runs the default DIVA config plus 4 variants (visenc/fixedquota/alpha1/widebeta)
+        # per dataset -- 15 tasks total. Combine with random/entropy/kmeans_center results
+        # from the same TAIL to compare every DIVA variant against the baselines on equal
+        # footing (same AL_ITERATIONS/SAMPLES_PER_ITER/epochs/seed).
+        run_parallel_task_queue \
+            "himanis_diva" "himanis_diva_visenc" "himanis_diva_fixedquota" "himanis_diva_alpha1" "himanis_diva_widebeta" \
+            "belfort_diva" "belfort_diva_visenc" "belfort_diva_fixedquota" "belfort_diva_alpha1" "belfort_diva_widebeta" \
+            "esposalles_diva" "esposalles_diva_visenc" "esposalles_diva_fixedquota" "esposalles_diva_alpha1" "esposalles_diva_widebeta"
+        ;;
     "parallel_baselines")
         run_parallel_task_queue \
             "himanis_random" "himanis_entropy" "himanis_kmeans" \
@@ -615,6 +723,18 @@ case "${MODE}" in
     "himanis_diva")
         run_al_diva "Teklia_Himanis-line" 1 2 3000 || exit 1
         ;;
+    "himanis_diva_visenc")
+        run_al_diva_variant "Teklia_Himanis-line" "visenc" "vision_encoder" "" "" 1 || exit 1
+        ;;
+    "himanis_diva_fixedquota")
+        run_al_diva_variant "Teklia_Himanis-line" "fixedquota" "" "" "" 0 || exit 1
+        ;;
+    "himanis_diva_alpha1")
+        run_al_diva_variant "Teklia_Himanis-line" "alpha1" "" 1 "" 1 || exit 1
+        ;;
+    "himanis_diva_widebeta")
+        run_al_diva_variant "Teklia_Himanis-line" "widebeta" "" "" 4 1 || exit 1
+        ;;
     "belfort")
         run_full_finetuning "Teklia_Belfort-line" || exit 1
         run_al_baseline "Teklia_Belfort-line" "random" || exit 1
@@ -637,6 +757,18 @@ case "${MODE}" in
     "belfort_diva")
         run_al_diva "Teklia_Belfort-line" 2 3 3000 || exit 1
         ;;
+    "belfort_diva_visenc")
+        run_al_diva_variant "Teklia_Belfort-line" "visenc" "vision_encoder" "" "" 1 || exit 1
+        ;;
+    "belfort_diva_fixedquota")
+        run_al_diva_variant "Teklia_Belfort-line" "fixedquota" "" "" "" 0 || exit 1
+        ;;
+    "belfort_diva_alpha1")
+        run_al_diva_variant "Teklia_Belfort-line" "alpha1" "" 1 "" 1 || exit 1
+        ;;
+    "belfort_diva_widebeta")
+        run_al_diva_variant "Teklia_Belfort-line" "widebeta" "" "" 6 1 || exit 1
+        ;;
     "esposalles")
         run_full_finetuning "Teklia_Esposalles-line" || exit 1
         run_al_baseline "Teklia_Esposalles-line" "random" || exit 1
@@ -658,6 +790,18 @@ case "${MODE}" in
         ;;
     "esposalles_diva")
         run_al_diva "Teklia_Esposalles-line" 2 2 2000 || exit 1
+        ;;
+    "esposalles_diva_visenc")
+        run_al_diva_variant "Teklia_Esposalles-line" "visenc" "vision_encoder" "" "" 1 || exit 1
+        ;;
+    "esposalles_diva_fixedquota")
+        run_al_diva_variant "Teklia_Esposalles-line" "fixedquota" "" "" "" 0 || exit 1
+        ;;
+    "esposalles_diva_alpha1")
+        run_al_diva_variant "Teklia_Esposalles-line" "alpha1" "" 1 "" 1 || exit 1
+        ;;
+    "esposalles_diva_widebeta")
+        run_al_diva_variant "Teklia_Esposalles-line" "widebeta" "" "" 4 1 || exit 1
         ;;
     "diva")
         TARGET=${DS_OVERRIDE:-"Teklia_Himanis-line"}
@@ -696,7 +840,8 @@ case "${MODE}" in
         done
         ;;
     *)
-        echo "Usage: $0 [parallel | parallel_with_full | parallel_datasets | parallel_diva | parallel_baselines | parallel_normal | parallel_normal_run3 | himanis | belfort | esposalles | all | clean] [gpu_ids] [dataset_override]"
+        echo "Usage: $0 [parallel | parallel_with_full | parallel_datasets | parallel_diva | parallel_baselines | parallel_normal | parallel_normal_run3 | diva_sweep | diva_sweep_run3 | himanis | belfort | esposalles | all | clean] [gpu_ids] [dataset_override]"
+        echo "DIVA variant tasks (per dataset): <ds>_diva_visenc | <ds>_diva_fixedquota | <ds>_diva_alpha1 | <ds>_diva_widebeta"
         exit 1
         ;;
 esac
