@@ -21,6 +21,12 @@
 #   - Finding 10: Multi-seed support ($SEED environment variable, default: 42).
 #   - Finding 13: Acquired sample IDs manifest persisted per iteration to JSON.
 #   - Finding 15: Prompt tokens masked (-100) during loss calculation.
+#   - DIVA cluster de-fragmentation: default alpha bumped 1-2 -> 20 for all datasets.
+#     At alpha=1-2, num_clusters (samples_per_iter/alpha) vastly outnumbered the
+#     candidate pool (~2-6 candidates/cluster), so KMeans found no real structure
+#     (silhouette_score ~0-0.03 across every DIVA run2 iteration). alpha=20 was the
+#     best-performing value in the existing retrain_diva_alphas.sh sweep data
+#     (silhouette climbs monotonically with alpha on every dataset tested).
 #
 # Output Tail / Tag:
 #   Default: "vis_embed" (directories, logs, results suffixed with _vis_embed)
@@ -126,7 +132,12 @@ resolve_dataset_config() {
             TEST_DIR="/dest/thura/data/Teklia_Himanis-line"
             PROMPT_PATH="${SCRIPT_DIR}/../eval/prompt_Teklia_Himanis-line.txt"
             PROMPT_TEXT="Transcribe the Latin script in this French text image into French text"
-            DEFAULT_ALPHA=1
+            # Alpha=20 (was 1): alpha=1 gives num_clusters = samples_per_iter/alpha = 200
+            # clusters from a ~400-candidate pool (~2 candidates/cluster) -- KMeans can't
+            # find real structure at that ratio. Confirmed via retrain_diva_alphas.sh's
+            # alpha sweep: silhouette_score climbs monotonically with alpha across every
+            # dataset (Himanis peaks ~0.071 at alpha=20 vs ~0.002-0.03 at alpha=1).
+            DEFAULT_ALPHA=20
             DEFAULT_BETA=2
             DEFAULT_SUBSET=3000
             ;;
@@ -137,7 +148,9 @@ resolve_dataset_config() {
             TEST_DIR="/dest/thura/data/Teklia_Belfort-line"
             PROMPT_PATH="${SCRIPT_DIR}/../eval/prompt_Teklia_Belfort-line.txt"
             PROMPT_TEXT="Transcribe the Latin script in this French text image into French text"
-            DEFAULT_ALPHA=2
+            # Alpha=20 (was 2): same cluster-fragmentation fix as Himanis above --
+            # silhouette_score at alpha=20 peaks ~0.072 vs ~0.025 at alpha=2.
+            DEFAULT_ALPHA=20
             DEFAULT_BETA=3
             DEFAULT_SUBSET=3000
             ;;
@@ -148,7 +161,9 @@ resolve_dataset_config() {
             TEST_DIR="/dest/thura/data/Teklia_Esposalles-line"
             PROMPT_PATH="${SCRIPT_DIR}/../eval/prompt_Teklia_Esposalles-line.txt"
             PROMPT_TEXT="Transcribe the Latin script in this Spanish text image into Spanish text"
-            DEFAULT_ALPHA=2
+            # Alpha=20 (was 2): same cluster-fragmentation fix -- silhouette_score at
+            # alpha=20 peaks ~0.054 vs ~0.025 at alpha=2.
+            DEFAULT_ALPHA=20
             DEFAULT_BETA=2
             DEFAULT_SUBSET=2000
             ;;
@@ -159,7 +174,10 @@ resolve_dataset_config() {
             TEST_DIR="/dest/thura/data/Jawi-OCR-data-v4-augmented"
             PROMPT_PATH="${SCRIPT_DIR}/../eval/prompt_Jawi-OCR-data-v4.txt"
             PROMPT_TEXT="Transcribe the Jawi script in this Malay text image into Malay text"
-            DEFAULT_ALPHA=1
+            # Alpha=20 (was 1): same cluster-fragmentation fix -- confirmed via the
+            # retrain_diva_alphas.sh alpha sweep on this dataset too (silhouette
+            # improves as alpha increases, same monotonic pattern as the other 3).
+            DEFAULT_ALPHA=20
             DEFAULT_BETA=2
             DEFAULT_SUBSET=3000
             ;;
@@ -170,7 +188,10 @@ resolve_dataset_config() {
             TEST_DIR="/dest/thura/data/${target_ds}"
             PROMPT_PATH="${SCRIPT_DIR}/../eval/prompt_${target_ds}.txt"
             PROMPT_TEXT="Transcribe the text in this image"
-            DEFAULT_ALPHA=2
+            # Alpha=20: no dedicated sweep evidence for arbitrary/unlisted datasets,
+            # but defaulting to the same de-fragmented value is safer than alpha=2
+            # (which we now know fragments badly) until this dataset gets its own sweep.
+            DEFAULT_ALPHA=20
             DEFAULT_BETA=2
             DEFAULT_SUBSET=2000
             ;;
@@ -433,7 +454,8 @@ run_al_diva() {
 #                   whatever $DIVERSITY_EMBED resolves to, usually "decoder")
 #   fixedquota      dynamic_quota OFF -- round-robin `alpha` picks per cluster,
 #                   instead of budget proportional to each cluster's mean uncertainty
-#   alpha1          alpha=1 -- maximum diversity (one line per cluster, more clusters)
+#   alpha40         alpha=40 -- even coarser clustering than the new default (20), to
+#                   check whether fewer/bigger clusters keep helping or start hurting
 #   widebeta        beta doubled -- larger uncertain candidate pool feeds the
 #                   diversity clustering, instead of a tightly uncertainty-filtered one
 # -------------------------------------------------------------------------
@@ -527,18 +549,34 @@ run_parallel_task_queue() {
     local task_list=("$@")
     IFS=',' read -r -a GPUS <<< "${GPU_IDS}"
 
+    # OOM resilience knobs (env-overridable):
+    #   MAX_TASK_RETRIES   how many times a failed task gets requeued before being
+    #                      given up on for good (default 2 -> 3 attempts total)
+    #   RETRY_DELAY_SECONDS   pause before a requeued task's next attempt, to give a
+    #                      contending external process (on a shared/multi-tenant GPU)
+    #                      a chance to finish and free memory
+    #   MIN_FREE_GB        a worker won't start a new task on its GPU until at least
+    #                      this much VRAM is free; 0 disables the check
+    MAX_TASK_RETRIES=${MAX_TASK_RETRIES:-2}
+    RETRY_DELAY_SECONDS=${RETRY_DELAY_SECONDS:-60}
+    MIN_FREE_GB=${MIN_FREE_GB:-15}
+
     echo "========================================================================="
     echo "LAUNCHING DYNAMIC PARALLEL QUEUE"
     echo "GPUs Assigned : ${GPUS[*]}"
     echo "Tasks (${#task_list[@]})     : ${task_list[*]}"
+    echo "OOM Handling  : retries=${MAX_TASK_RETRIES} delay=${RETRY_DELAY_SECONDS}s min_free=${MIN_FREE_GB}GB"
     echo "========================================================================="
 
     QUEUE_FILE=$(mktemp /tmp/aug_fixed_queue_${TAIL}.XXXXXX)
     LOCK_DIR="/tmp/aug_fixed_queue_${TAIL}.lock"
+    FAILURES_FILE=$(mktemp /tmp/aug_fixed_failures_${TAIL}.XXXXXX)
+    : > "${FAILURES_FILE}"
     rm -rf "${LOCK_DIR}"
 
+    # Each queue line is "task_name::retry_count" -- retry_count starts at 0.
     for t in "${task_list[@]}"; do
-        echo "$t" >> "${QUEUE_FILE}"
+        echo "${t}::0" >> "${QUEUE_FILE}"
     done
 
     WORKER_PIDS=()
@@ -547,11 +585,36 @@ run_parallel_task_queue() {
         for pid in "${WORKER_PIDS[@]}"; do
             kill -TERM "${pid}" 2>/dev/null
         done
-        rm -f "${QUEUE_FILE}"
+        rm -f "${QUEUE_FILE}" "${FAILURES_FILE}"
         rm -rf "${LOCK_DIR}"
         exit 1
     }
     trap cleanup_parallel INT TERM
+
+    # Blocks until GPU ${1} reports at least MIN_FREE_GB free, or gives up after a
+    # bounded wait and proceeds anyway (so a stuck/misreporting GPU can't hang the
+    # queue forever). Skips entirely if MIN_FREE_GB=0 or nvidia-smi isn't available.
+    wait_for_gpu_headroom() {
+        local gpu_id="$1"
+        local worker_log="$2"
+        [ "${MIN_FREE_GB}" -le 0 ] && return 0
+        command -v nvidia-smi >/dev/null 2>&1 || return 0
+
+        local max_checks=10
+        local check_interval=30
+        for ((i = 0; i < max_checks; i++)); do
+            local free_mb
+            free_mb=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "${gpu_id}" 2>/dev/null | tr -d ' ')
+            [ -z "${free_mb}" ] && return 0
+            local free_gb=$((free_mb / 1024))
+            if [ "${free_gb}" -ge "${MIN_FREE_GB}" ]; then
+                return 0
+            fi
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU ${gpu_id} only ${free_gb}GB free (< ${MIN_FREE_GB}GB) -- likely another process using it. Waiting ${check_interval}s..." >> "${worker_log}"
+            sleep "${check_interval}"
+        done
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU ${gpu_id} still below ${MIN_FREE_GB}GB free after $((max_checks * check_interval))s -- proceeding anyway." >> "${worker_log}"
+    }
 
     run_gpu_worker() {
         local worker_gpu="$1"
@@ -559,32 +622,50 @@ run_parallel_task_queue() {
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Worker started on GPU ${worker_gpu}" > "${worker_log}"
 
         while true; do
-            local task=""
+            local raw_task=""
             while ! mkdir "${LOCK_DIR}" 2>/dev/null; do
                 sleep 0.1
             done
 
             if [ -s "${QUEUE_FILE}" ]; then
-                task=$(head -n 1 "${QUEUE_FILE}")
+                raw_task=$(head -n 1 "${QUEUE_FILE}")
                 sed -i '1d' "${QUEUE_FILE}"
             fi
             rmdir "${LOCK_DIR}" 2>/dev/null
 
-            if [ -z "${task}" ]; then
+            if [ -z "${raw_task}" ]; then
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Queue empty. Worker GPU ${worker_gpu} exiting." >> "${worker_log}"
                 break
             fi
 
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU ${worker_gpu} >>> Starting Task: ${task}" >> "${worker_log}"
+            local task="${raw_task%%::*}"
+            local retry_count="${raw_task##*::}"
+
+            wait_for_gpu_headroom "${worker_gpu}" "${worker_log}"
+
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU ${worker_gpu} >>> Starting Task: ${task} (attempt $((retry_count + 1))/$((MAX_TASK_RETRIES + 1)))" >> "${worker_log}"
             "$0" "${task}" "${worker_gpu}" >> "${worker_log}" 2>&1
             local exit_code=$?
 
             if [ ${exit_code} -ne 0 ]; then
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Task ${task} failed on GPU ${worker_gpu}!" >> "${worker_log}"
-                return ${exit_code}
+                if [ "${retry_count}" -lt "${MAX_TASK_RETRIES}" ]; then
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Task ${task} FAILED (attempt $((retry_count + 1))) on GPU ${worker_gpu} -- requeueing after ${RETRY_DELAY_SECONDS}s." >> "${worker_log}"
+                    sleep "${RETRY_DELAY_SECONDS}"
+                    while ! mkdir "${LOCK_DIR}" 2>/dev/null; do sleep 0.1; done
+                    echo "${task}::$((retry_count + 1))" >> "${QUEUE_FILE}"
+                    rmdir "${LOCK_DIR}" 2>/dev/null
+                else
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Task ${task} PERMANENTLY FAILED after $((MAX_TASK_RETRIES + 1)) attempts on GPU ${worker_gpu}!" >> "${worker_log}"
+                    while ! mkdir "${LOCK_DIR}" 2>/dev/null; do sleep 0.1; done
+                    echo "${task}" >> "${FAILURES_FILE}"
+                    rmdir "${LOCK_DIR}" 2>/dev/null
+                fi
             else
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] SUCCESS: Task ${task} completed on GPU ${worker_gpu}." >> "${worker_log}"
             fi
+            # Never exit the loop on failure -- one bad task must not bench this GPU
+            # for the rest of the queue; it either got requeued above or was logged
+            # as a permanent failure, and either way this worker keeps pulling tasks.
         done
     }
 
@@ -595,18 +676,23 @@ run_parallel_task_queue() {
         echo "Worker launched on GPU ${gpu} (PID: ${pid})"
     done
 
-    FAILURES=0
     for pid in "${WORKER_PIDS[@]}"; do
-        wait "${pid}" || FAILURES=$((FAILURES + 1))
+        wait "${pid}"
     done
 
     rm -f "${QUEUE_FILE}"
     rm -rf "${LOCK_DIR}"
 
-    if [ ${FAILURES} -ne 0 ]; then
-        echo "ERROR: ${FAILURES} worker(s) encountered failures! Check ${SCRIPT_DIR}/logs/worker_gpu*_${TAIL}.log"
+    if [ -s "${FAILURES_FILE}" ]; then
+        local n_failed
+        n_failed=$(wc -l < "${FAILURES_FILE}" | tr -d ' ')
+        echo "ERROR: ${n_failed} task(s) permanently failed after $((MAX_TASK_RETRIES + 1)) attempts each:"
+        cat "${FAILURES_FILE}"
+        echo "Check ${SCRIPT_DIR}/logs/worker_gpu*_${TAIL}.log and the individual train_*.log files for details."
+        rm -f "${FAILURES_FILE}"
         exit 1
     fi
+    rm -f "${FAILURES_FILE}"
 }
 
 # -------------------------------------------------------------------------
@@ -685,15 +771,28 @@ case "${MODE}" in
     "parallel_diva")
         run_parallel_task_queue "himanis_diva" "belfort_diva" "esposalles_diva"
         ;;
+    "resume_run3")
+        # One-off: the 3 tasks that OOM'd from external GPU contention in the last
+        # run2/run3 launch (belfort_entropy, belfort_kmeans, himanis_random -- died
+        # before completing any/all 5 AL iterations) plus the 3 default DIVA tasks
+        # (now alpha=20 instead of the fragmented 1/2). Queued together so the OOM
+        # retry/requeue/headroom-check logic in run_parallel_task_queue covers all 6 --
+        # running them as separate standalone commands would skip that protection
+        # for exactly the tasks that need it most.
+        run_parallel_task_queue \
+            "belfort_entropy" "belfort_kmeans" "himanis_random" \
+            "himanis_diva" "belfort_diva" "esposalles_diva"
+        ;;
     "diva_sweep")
-        # Runs the default DIVA config plus 4 variants (visenc/fixedquota/alpha1/widebeta)
+        # Runs the default DIVA config (now alpha=20, de-fragmented) plus 4 variants
+        # (visenc/fixedquota/alpha40/widebeta)
         # per dataset -- 15 tasks total. Combine with random/entropy/kmeans_center results
         # from the same TAIL to compare every DIVA variant against the baselines on equal
         # footing (same AL_ITERATIONS/SAMPLES_PER_ITER/epochs/seed).
         run_parallel_task_queue \
-            "himanis_diva" "himanis_diva_visenc" "himanis_diva_fixedquota" "himanis_diva_alpha1" "himanis_diva_widebeta" \
-            "belfort_diva" "belfort_diva_visenc" "belfort_diva_fixedquota" "belfort_diva_alpha1" "belfort_diva_widebeta" \
-            "esposalles_diva" "esposalles_diva_visenc" "esposalles_diva_fixedquota" "esposalles_diva_alpha1" "esposalles_diva_widebeta"
+            "himanis_diva" "himanis_diva_visenc" "himanis_diva_fixedquota" "himanis_diva_alpha40" "himanis_diva_widebeta" \
+            "belfort_diva" "belfort_diva_visenc" "belfort_diva_fixedquota" "belfort_diva_alpha40" "belfort_diva_widebeta" \
+            "esposalles_diva" "esposalles_diva_visenc" "esposalles_diva_fixedquota" "esposalles_diva_alpha40" "esposalles_diva_widebeta"
         ;;
     "parallel_baselines")
         run_parallel_task_queue \
@@ -706,7 +805,7 @@ case "${MODE}" in
         run_al_baseline "Teklia_Himanis-line" "random" || exit 1
         run_al_baseline "Teklia_Himanis-line" "entropy" || exit 1
         run_al_baseline "Teklia_Himanis-line" "kmeans_center" || exit 1
-        run_al_diva "Teklia_Himanis-line" 1 2 3000 || exit 1
+        run_al_diva "Teklia_Himanis-line" 20 2 3000 || exit 1
         ;;
     "himanis_full")
         run_full_finetuning "Teklia_Himanis-line" || exit 1
@@ -721,7 +820,7 @@ case "${MODE}" in
         run_al_baseline "Teklia_Himanis-line" "kmeans_center" || exit 1
         ;;
     "himanis_diva")
-        run_al_diva "Teklia_Himanis-line" 1 2 3000 || exit 1
+        run_al_diva "Teklia_Himanis-line" 20 2 3000 || exit 1
         ;;
     "himanis_diva_visenc")
         run_al_diva_variant "Teklia_Himanis-line" "visenc" "vision_encoder" "" "" 1 || exit 1
@@ -729,8 +828,8 @@ case "${MODE}" in
     "himanis_diva_fixedquota")
         run_al_diva_variant "Teklia_Himanis-line" "fixedquota" "" "" "" 0 || exit 1
         ;;
-    "himanis_diva_alpha1")
-        run_al_diva_variant "Teklia_Himanis-line" "alpha1" "" 1 "" 1 || exit 1
+    "himanis_diva_alpha40")
+        run_al_diva_variant "Teklia_Himanis-line" "alpha40" "" 40 "" 1 || exit 1
         ;;
     "himanis_diva_widebeta")
         run_al_diva_variant "Teklia_Himanis-line" "widebeta" "" "" 4 1 || exit 1
@@ -740,7 +839,7 @@ case "${MODE}" in
         run_al_baseline "Teklia_Belfort-line" "random" || exit 1
         run_al_baseline "Teklia_Belfort-line" "entropy" || exit 1
         run_al_baseline "Teklia_Belfort-line" "kmeans_center" || exit 1
-        run_al_diva "Teklia_Belfort-line" 2 3 3000 || exit 1
+        run_al_diva "Teklia_Belfort-line" 20 3 3000 || exit 1
         ;;
     "belfort_full")
         run_full_finetuning "Teklia_Belfort-line" || exit 1
@@ -755,7 +854,7 @@ case "${MODE}" in
         run_al_baseline "Teklia_Belfort-line" "kmeans_center" || exit 1
         ;;
     "belfort_diva")
-        run_al_diva "Teklia_Belfort-line" 2 3 3000 || exit 1
+        run_al_diva "Teklia_Belfort-line" 20 3 3000 || exit 1
         ;;
     "belfort_diva_visenc")
         run_al_diva_variant "Teklia_Belfort-line" "visenc" "vision_encoder" "" "" 1 || exit 1
@@ -763,8 +862,8 @@ case "${MODE}" in
     "belfort_diva_fixedquota")
         run_al_diva_variant "Teklia_Belfort-line" "fixedquota" "" "" "" 0 || exit 1
         ;;
-    "belfort_diva_alpha1")
-        run_al_diva_variant "Teklia_Belfort-line" "alpha1" "" 1 "" 1 || exit 1
+    "belfort_diva_alpha40")
+        run_al_diva_variant "Teklia_Belfort-line" "alpha40" "" 40 "" 1 || exit 1
         ;;
     "belfort_diva_widebeta")
         run_al_diva_variant "Teklia_Belfort-line" "widebeta" "" "" 6 1 || exit 1
@@ -774,7 +873,7 @@ case "${MODE}" in
         run_al_baseline "Teklia_Esposalles-line" "random" || exit 1
         run_al_baseline "Teklia_Esposalles-line" "entropy" || exit 1
         run_al_baseline "Teklia_Esposalles-line" "kmeans_center" || exit 1
-        run_al_diva "Teklia_Esposalles-line" 2 2 2000 || exit 1
+        run_al_diva "Teklia_Esposalles-line" 20 2 2000 || exit 1
         ;;
     "esposalles_full")
         run_full_finetuning "Teklia_Esposalles-line" || exit 1
@@ -789,7 +888,7 @@ case "${MODE}" in
         run_al_baseline "Teklia_Esposalles-line" "kmeans_center" || exit 1
         ;;
     "esposalles_diva")
-        run_al_diva "Teklia_Esposalles-line" 2 2 2000 || exit 1
+        run_al_diva "Teklia_Esposalles-line" 20 2 2000 || exit 1
         ;;
     "esposalles_diva_visenc")
         run_al_diva_variant "Teklia_Esposalles-line" "visenc" "vision_encoder" "" "" 1 || exit 1
@@ -797,8 +896,8 @@ case "${MODE}" in
     "esposalles_diva_fixedquota")
         run_al_diva_variant "Teklia_Esposalles-line" "fixedquota" "" "" "" 0 || exit 1
         ;;
-    "esposalles_diva_alpha1")
-        run_al_diva_variant "Teklia_Esposalles-line" "alpha1" "" 1 "" 1 || exit 1
+    "esposalles_diva_alpha40")
+        run_al_diva_variant "Teklia_Esposalles-line" "alpha40" "" 40 "" 1 || exit 1
         ;;
     "esposalles_diva_widebeta")
         run_al_diva_variant "Teklia_Esposalles-line" "widebeta" "" "" 4 1 || exit 1
@@ -840,8 +939,8 @@ case "${MODE}" in
         done
         ;;
     *)
-        echo "Usage: $0 [parallel | parallel_with_full | parallel_datasets | parallel_diva | parallel_baselines | parallel_normal | parallel_normal_run3 | diva_sweep | diva_sweep_run3 | himanis | belfort | esposalles | all | clean] [gpu_ids] [dataset_override]"
-        echo "DIVA variant tasks (per dataset): <ds>_diva_visenc | <ds>_diva_fixedquota | <ds>_diva_alpha1 | <ds>_diva_widebeta"
+        echo "Usage: $0 [parallel | parallel_with_full | parallel_datasets | parallel_diva | parallel_baselines | parallel_normal | parallel_normal_run3 | diva_sweep | diva_sweep_run3 | resume_run3 | himanis | belfort | esposalles | all | clean] [gpu_ids] [dataset_override]"
+        echo "DIVA variant tasks (per dataset): <ds>_diva_visenc | <ds>_diva_fixedquota | <ds>_diva_alpha40 | <ds>_diva_widebeta"
         exit 1
         ;;
 esac
