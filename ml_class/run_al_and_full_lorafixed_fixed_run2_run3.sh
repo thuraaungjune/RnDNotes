@@ -783,6 +783,14 @@ case "${MODE}" in
             "belfort_entropy" "belfort_kmeans" "himanis_random" \
             "himanis_diva" "belfort_diva" "esposalles_diva"
         ;;
+    "diva_visenc")
+        # Vision-encoder DIVA (alpha=20 default) for all 3 datasets, cheapest first so
+        # a single GPU gets the fastest end-to-end signal: Esposalles (~5h), Himanis
+        # (~13h), Belfort (~17h). Same budget/epochs/seed as the existing baselines,
+        # so their numbers are the comparison -- no baseline reruns needed.
+        run_parallel_task_queue \
+            "esposalles_diva_visenc" "himanis_diva_visenc" "belfort_diva_visenc"
+        ;;
     "diva_sweep")
         # Runs the default DIVA config (now alpha=20, de-fragmented) plus 4 variants
         # (visenc/fixedquota/alpha40/widebeta)
@@ -939,7 +947,7 @@ case "${MODE}" in
         done
         ;;
     *)
-        echo "Usage: $0 [parallel | parallel_with_full | parallel_datasets | parallel_diva | parallel_baselines | parallel_normal | parallel_normal_run3 | diva_sweep | diva_sweep_run3 | resume_run3 | himanis | belfort | esposalles | all | clean] [gpu_ids] [dataset_override]"
+        echo "Usage: $0 [parallel | parallel_with_full | parallel_datasets | parallel_diva | parallel_baselines | parallel_normal | parallel_normal_run3 | diva_sweep | diva_sweep_run3 | diva_visenc | resume_run3 | himanis | belfort | esposalles | all | clean] [gpu_ids] [dataset_override]"
         echo "DIVA variant tasks (per dataset): <ds>_diva_visenc | <ds>_diva_fixedquota | <ds>_diva_alpha40 | <ds>_diva_widebeta"
         exit 1
         ;;
