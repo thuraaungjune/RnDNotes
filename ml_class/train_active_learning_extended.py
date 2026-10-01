@@ -188,13 +188,22 @@ def evaluate_and_select_lines(
     seed: int = 42,
     dynamic_quota: bool = False,
     is_latin: bool = False,
-    diversity_embedding_type: str = "vision_encoder"
-) -> Tuple[List[str], float, Dict[str, Any]]:
+    diversity_embedding_type: str = "vision_encoder",
+    self_distill_ratio: float = 0.0
+) -> Tuple[List[str], float, Dict[str, Any], List[Dict[str, Any]]]:
     """
     Evaluates candidate original lines and selects top K lines using DIVA or Oracle/Random.
     Fixes EOS masking (Finding 08), float32 cast (Finding 04). Diversity features are pooled
     from the vision encoder/projector output (extract_visual_diversity_features), not the LLM
     decoder's hidden state, so they track visual appearance rather than transcription content.
+
+    self_distill_ratio (default 0.0, disabled): also returns up to
+    `round(self_distill_ratio * num_lines_to_select)` self-distillation candidates -- the
+    globally most-confident evaluated lines that were NOT claimed by the oracle pool above
+    (i.e. the tail of `all_uncertainties` past `candidate_pool_size`). This costs zero extra
+    forward passes: uncertainty, embedding, and the model's own predicted text are already
+    computed for every evaluated candidate during scoring; a ratio of 0 just means that tail
+    keeps getting discarded as before. See slides_notes_future_directions.md Direction 2.
     """
     unlabeled_line_ids = list(unlabeled_line_dict.keys())
     if len(unlabeled_line_ids) > subset_size:
@@ -281,6 +290,10 @@ def evaluate_and_select_lines(
                 # Fix 08: Exact EOS masking in sequence uncertainty
                 # Extract generated token sequences (excluding prompt tokens)
                 gen_sequences = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], generated_outputs.sequences)]
+                # Decoded here (not just scored) so the self-distillation pool below can use
+                # the model's own transcription as a pseudo-label without a second generate()
+                # call -- cheap (text, not logits) and thrown away unused when ratio=0.
+                batch_predicted_text = processor.tokenizer.batch_decode(gen_sequences, skip_special_tokens=True)
                 batch_confidences = [[] for _ in range(len(batch_imgs))]
 
                 for step_idx, step_logits in enumerate(generated_outputs.scores):
@@ -299,7 +312,10 @@ def evaluate_and_select_lines(
                 ]
 
             for sub_idx, lid in enumerate(batch_line_ids):
-                all_uncertainties.append((lid, batch_uncertainties[sub_idx], pooled_embeddings[sub_idx]))
+                all_uncertainties.append((
+                    lid, batch_uncertainties[sub_idx], pooled_embeddings[sub_idx],
+                    batch_predicted_text[sub_idx]
+                ))
 
         except Exception as e:
             print(f"[Error] Failed candidate batch feature extraction: {e}")
@@ -317,6 +333,27 @@ def evaluate_and_select_lines(
     else:
         print(f"[Active Learning] Prefilter: Retaining top {candidate_pool_size} most uncertain candidates (out of {len(all_uncertainties)}).")
         candidates = all_uncertainties[:candidate_pool_size]
+
+    # Self-distillation pool (self_distill_ratio=0.0 by default -- disabled, no behavior
+    # change). The globally most-confident candidates NOT already claimed by the oracle
+    # pool above: the tail of the same uncertainty-sorted list past candidate_pool_size.
+    # Zero extra forward passes -- uncertainty/embedding/predicted-text were already
+    # computed for every evaluated candidate in the scoring loop above; this just stops
+    # discarding that tail. See slides_notes_future_directions.md Direction 2.
+    self_distill_count = min(
+        int(round(self_distill_ratio * num_lines_to_select)),
+        max(0, len(all_uncertainties) - candidate_pool_size),
+    )
+    self_distill_items: List[Dict[str, Any]] = []
+    if self_distill_count > 0:
+        for lid, uncertainty, _embedding, predicted_text in all_uncertainties[-self_distill_count:]:
+            self_distill_items.append({
+                "line_id": lid,
+                "predicted_text": predicted_text,
+                "uncertainty": uncertainty,
+            })
+        print(f"[Active Learning] Self-distillation pool: {len(self_distill_items)} most-confident "
+              f"candidates (self_distill_ratio={self_distill_ratio}), 0 extra forward passes.")
 
     num_clusters = max(1, num_lines_to_select // alpha)
     print(f"[Active Learning] Clustering {len(candidates)} candidates into {num_clusters} visual diversity groups...")
@@ -387,7 +424,7 @@ def evaluate_and_select_lines(
         "avg_selected_uncertainty": avg_sel_uncertainty
     }
     print(f"[Active Learning] Selected {len(selected_line_ids)} lines. Silhouette: {sil_score:.4f}, Mean Uncertainty: {avg_sel_uncertainty:.4f}")
-    return selected_line_ids, avg_sel_uncertainty, cluster_info
+    return selected_line_ids, avg_sel_uncertainty, cluster_info, self_distill_items
 
 
 def evaluate_test_set(
@@ -484,6 +521,7 @@ def main():
     parser.add_argument("--dynamic_quota", action="store_true")
     parser.add_argument("--eval_all_errors", action="store_true")
     parser.add_argument("--diversity_embedding_type", type=str, default="vision_encoder", choices=["vision_encoder", "decoder"], help="Visual diversity feature space")
+    parser.add_argument("--self_distill_ratio", type=float, default=0.0, help="Size of the self-distillation pool (most-confident, un-selected candidates) relative to samples_per_iter. 0.0 = disabled (default, no behavior change). 1.0 = equal-sized to the human-oracle selection.")
 
     # Training arguments
     parser.add_argument("--batch_size", type=int, default=8)
@@ -720,7 +758,7 @@ def main():
 
         if al_iter < args.al_iterations:
             # Active Selection
-            selected_lines, avg_u, cluster_info = evaluate_and_select_lines(
+            selected_lines, avg_u, cluster_info, self_distill_items = evaluate_and_select_lines(
                 model=model,
                 processor=processor,
                 unlabeled_line_dict=unlabeled_line_to_rows,
@@ -736,15 +774,26 @@ def main():
                 seed=args.seed,
                 dynamic_quota=args.dynamic_quota,
                 is_latin=is_latin,
-                diversity_embedding_type=args.diversity_embedding_type
+                diversity_embedding_type=args.diversity_embedding_type,
+                self_distill_ratio=args.self_distill_ratio
             )
             iter_metrics["avg_selected_uncertainty"] = avg_u
             iter_metrics.update(cluster_info)
+            iter_metrics["self_distill_pool_size"] = len(self_distill_items)
 
             # Fix 13: Persist acquired sample IDs manifest
             manifest_file = os.path.join(results_dir, f"{run_name}_iter_{al_iter}_acquired_ids.json")
             with open(manifest_file, "w", encoding="utf-8") as mf:
                 json.dump({"iteration": al_iter, "acquired_lines": selected_lines}, mf, indent=2)
+
+            # Self-distillation pool manifest (empty/absent when self_distill_ratio=0.0).
+            # Not yet consumed by training -- evaluate_and_select_lines() only identifies
+            # and persists this pool; wiring a distillation loss into the Trainer below is
+            # a separate follow-up (see slides_notes_future_directions.md Direction 2).
+            if self_distill_items:
+                sd_manifest_file = os.path.join(results_dir, f"{run_name}_iter_{al_iter}_self_distill_pool.json")
+                with open(sd_manifest_file, "w", encoding="utf-8") as sdf:
+                    json.dump({"iteration": al_iter, "self_distill_items": self_distill_items}, sdf, indent=2)
 
             for lid in selected_lines:
                 labeled_line_ids.add(lid)
