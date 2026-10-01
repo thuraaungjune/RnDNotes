@@ -458,6 +458,16 @@ run_al_diva() {
 #                   check whether fewer/bigger clusters keep helping or start hurting
 #   widebeta        beta doubled -- larger uncertain candidate pool feeds the
 #                   diversity clustering, instead of a tightly uncertainty-filtered one
+#   selfdistill     self_distill_ratio=1.0 on top of the vision-encoder alpha=20 fixed
+#                   config -- adds a same-sized pool of self-distillation candidates
+#                   (globally most-confident, un-selected lines; zero extra human-labeling
+#                   budget) alongside the usual human-oracle selection. NOTE: as of this
+#                   script, evaluate_and_select_lines() only IDENTIFIES and PERSISTS this
+#                   pool (results/vis_div_results/..._iter_N_self_distill_pool.json) --
+#                   no distillation loss is wired into training yet, so this variant
+#                   currently trains identically to "visenc" and only produces the pool
+#                   manifests for inspection. See slides_notes_future_directions.md
+#                   Direction 2.
 # -------------------------------------------------------------------------
 run_al_diva_variant() {
     local target_ds="$1"
@@ -466,19 +476,21 @@ run_al_diva_variant() {
     local alpha_override="$4"     # "" = use dataset default
     local beta_override="$5"      # "" = use dataset default
     local use_dynamic_quota="$6"  # "1" or "0"
+    local sdr_override="$7"       # "" = 0.0 (self-distillation disabled)
     resolve_dataset_config "${target_ds}"
 
     local embed_val=${embed_override:-${DIVERSITY_EMBED}}
     local alpha_val=${alpha_override:-${DEFAULT_ALPHA}}
     local beta_val=${beta_override:-${DEFAULT_BETA}}
     local subset_val=${DEFAULT_SUBSET}
+    local sdr_val=${sdr_override:-0.0}
 
     local OUTPUT_DIR="${SCRIPT_DIR}/models/${CUR_DS}_al_diva_${variant_label}_alpha${alpha_val}_seed${SEED}_${TAIL}"
     local TRAIN_LOG="${SCRIPT_DIR}/logs/train_${CUR_DS}_al_diva_${variant_label}_alpha${alpha_val}_seed${SEED}_${TAIL}.log"
 
     echo ""
     echo "#########################################################################"
-    echo "DIVA Variant [${variant_label}]: ${CUR_DS} (Alpha=${alpha_val}, Beta=${beta_val}, Embed=${embed_val}, DynQuota=${use_dynamic_quota}) [Seed ${SEED}, Tail ${TAIL}]"
+    echo "DIVA Variant [${variant_label}]: ${CUR_DS} (Alpha=${alpha_val}, Beta=${beta_val}, Embed=${embed_val}, DynQuota=${use_dynamic_quota}, SelfDistillRatio=${sdr_val}) [Seed ${SEED}, Tail ${TAIL}]"
     echo "#########################################################################"
 
     if [ "${FORCE}" -ne 1 ] && [ -d "${OUTPUT_DIR}/iter_${AL_ITERATIONS}_model" ]; then
@@ -516,6 +528,7 @@ run_al_diva_variant() {
             --tuning_mode "${TUNING_MODE}" \
             --target_modules ${LORA_TARGETS} \
             --diversity_embedding_type "${embed_val}" \
+            --self_distill_ratio ${sdr_val} \
             --lr ${LR} \
             --batch_size ${BATCH_SIZE} \
             --gradient_accumulation_steps ${GRAD_ACCUM} \
@@ -772,16 +785,35 @@ case "${MODE}" in
         run_parallel_task_queue "himanis_diva" "belfort_diva" "esposalles_diva"
         ;;
     "resume_run3")
-        # One-off: the 3 tasks that OOM'd from external GPU contention in the last
-        # run2/run3 launch (belfort_entropy, belfort_kmeans, himanis_random -- died
-        # before completing any/all 5 AL iterations) plus the 3 default DIVA tasks
-        # (now alpha=20 instead of the fragmented 1/2). Queued together so the OOM
-        # retry/requeue/headroom-check logic in run_parallel_task_queue covers all 6 --
-        # running them as separate standalone commands would skip that protection
-        # for exactly the tasks that need it most.
+        # Dead mode, kept only so `resume_run3` fails loudly instead of silently
+        # doing the wrong thing: the generic _run2/_run3/_vis_embed suffix strip
+        # above runs before this case statement and unconditionally eats a
+        # trailing "_run3" off MODE, so "resume_run3" as typed on the CLI never
+        # reaches this branch -- it becomes MODE="resume", which isn't a case
+        # here either, and falls through to the usage message. Use resume_ooms.
+        echo "resume_run3 is unreachable (MODE gets stripped to 'resume' by the" >&2
+        echo "generic run2/run3/vis_embed suffix handling above). Use resume_ooms." >&2
+        exit 1
+        ;;
+    "resume_ooms")
+        # One-off: rerun the 3 baseline tasks that OOM'd from external GPU contention
+        # in the run2 launch -- belfort_entropy, belfort_kmeans (died right after
+        # iteration 0, 1 row in their _run2 CSVs) and himanis_random (died after
+        # iteration 2, 3 rows). No mid-run resume exists (train_al_baselines.py has
+        # no checkpoint/start-iteration flag), so each task restarts its full
+        # 5-iteration loop from scratch. Tagged run3 (not run2) so a fresh, complete
+        # run isn't at risk of colliding with the partial run2 CSVs mid-write; merge
+        # the finished run3 rows into the comparison tables in place of those 3 cells.
+        # Routed through run_parallel_task_queue (not called standalone) so these
+        # get the retry/requeue/headroom-check protection built for exactly this
+        # failure mode -- a shared GPU with invisible external contention, not a
+        # pipeline bug. The now-redundant decoder-embedding DIVA reruns that used to
+        # ride along here are dropped: the vision-encoder alpha=20 DIVA run (see
+        # `diva_visenc`) already supersedes them.
+        export DIVERSITY_EMBED="decoder"
+        export TAIL="run3"
         run_parallel_task_queue \
-            "belfort_entropy" "belfort_kmeans" "himanis_random" \
-            "himanis_diva" "belfort_diva" "esposalles_diva"
+            "belfort_entropy" "belfort_kmeans" "himanis_random"
         ;;
     "diva_visenc")
         # Vision-encoder DIVA (alpha=20 default) for all 3 datasets, cheapest first so
@@ -790,6 +822,24 @@ case "${MODE}" in
         # so their numbers are the comparison -- no baseline reruns needed.
         run_parallel_task_queue \
             "esposalles_diva_visenc" "himanis_diva_visenc" "belfort_diva_visenc"
+        ;;
+    "diva_selfdistill")
+        # Vision-encoder alpha=20 DIVA + self_distill_ratio=1.0 for all 3 datasets,
+        # cheapest first (same ordering/timing as diva_visenc -- the self-distill pool
+        # is identified from candidates already being scored, so it doesn't add scoring
+        # time; current epoch/batch counts are unchanged too since nothing consumes the
+        # pool in training yet).
+        #
+        # IMPORTANT: as of this script, this trains IDENTICALLY to diva_visenc. Only the
+        # self-distillation POOL gets identified and persisted
+        # (results/vis_div_results/..._iter_N_self_distill_pool.json per iteration) --
+        # no distillation loss is wired into the Trainer yet. Running this now produces
+        # CER results indistinguishable from the already-completed diva_visenc run (see
+        # new_run_comparison.md) plus the pool manifests for offline inspection. Re-check
+        # this comment once the loss is wired before relying on this mode for a real
+        # before/after comparison.
+        run_parallel_task_queue \
+            "esposalles_diva_selfdistill" "himanis_diva_selfdistill" "belfort_diva_selfdistill"
         ;;
     "diva_sweep")
         # Runs the default DIVA config (now alpha=20, de-fragmented) plus 4 variants
@@ -833,6 +883,9 @@ case "${MODE}" in
     "himanis_diva_visenc")
         run_al_diva_variant "Teklia_Himanis-line" "visenc" "vision_encoder" "" "" 1 || exit 1
         ;;
+    "himanis_diva_selfdistill")
+        run_al_diva_variant "Teklia_Himanis-line" "selfdistill" "vision_encoder" "" "" 1 1.0 || exit 1
+        ;;
     "himanis_diva_fixedquota")
         run_al_diva_variant "Teklia_Himanis-line" "fixedquota" "" "" "" 0 || exit 1
         ;;
@@ -867,6 +920,9 @@ case "${MODE}" in
     "belfort_diva_visenc")
         run_al_diva_variant "Teklia_Belfort-line" "visenc" "vision_encoder" "" "" 1 || exit 1
         ;;
+    "belfort_diva_selfdistill")
+        run_al_diva_variant "Teklia_Belfort-line" "selfdistill" "vision_encoder" "" "" 1 1.0 || exit 1
+        ;;
     "belfort_diva_fixedquota")
         run_al_diva_variant "Teklia_Belfort-line" "fixedquota" "" "" "" 0 || exit 1
         ;;
@@ -900,6 +956,9 @@ case "${MODE}" in
         ;;
     "esposalles_diva_visenc")
         run_al_diva_variant "Teklia_Esposalles-line" "visenc" "vision_encoder" "" "" 1 || exit 1
+        ;;
+    "esposalles_diva_selfdistill")
+        run_al_diva_variant "Teklia_Esposalles-line" "selfdistill" "vision_encoder" "" "" 1 1.0 || exit 1
         ;;
     "esposalles_diva_fixedquota")
         run_al_diva_variant "Teklia_Esposalles-line" "fixedquota" "" "" "" 0 || exit 1
@@ -947,8 +1006,8 @@ case "${MODE}" in
         done
         ;;
     *)
-        echo "Usage: $0 [parallel | parallel_with_full | parallel_datasets | parallel_diva | parallel_baselines | parallel_normal | parallel_normal_run3 | diva_sweep | diva_sweep_run3 | diva_visenc | resume_run3 | himanis | belfort | esposalles | all | clean] [gpu_ids] [dataset_override]"
-        echo "DIVA variant tasks (per dataset): <ds>_diva_visenc | <ds>_diva_fixedquota | <ds>_diva_alpha40 | <ds>_diva_widebeta"
+        echo "Usage: $0 [parallel | parallel_with_full | parallel_datasets | parallel_diva | parallel_baselines | parallel_normal | parallel_normal_run3 | diva_sweep | diva_sweep_run3 | diva_visenc | diva_selfdistill | resume_ooms | himanis | belfort | esposalles | all | clean] [gpu_ids] [dataset_override]"
+        echo "DIVA variant tasks (per dataset): <ds>_diva_visenc | <ds>_diva_fixedquota | <ds>_diva_alpha40 | <ds>_diva_widebeta | <ds>_diva_selfdistill"
         exit 1
         ;;
 esac
