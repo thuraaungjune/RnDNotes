@@ -95,12 +95,7 @@ run_one() {
         --epochs "${AL_EPOCHS}" \
         --freeze_vision_encoder \
         --seed "${SEED}" \
-        > "${train_log}" 2>&1
-
-    if [ $? -ne 0 ]; then
-        echo "ERROR: ${ds_name} failed! Check: ${train_log}"
-        return 1
-    fi
+        > "${train_log}" 2>&1 || { echo "ERROR: ${ds_name} failed! Check: ${train_log}"; return 1; }
     rm -rf "${output_dir}/trainer_tmp" 2>/dev/null
     echo "${ds_name} complete."
 }
