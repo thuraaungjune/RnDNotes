@@ -522,10 +522,19 @@ def run_self_distillation_pass(
             # the prompt's own tokens with the item's STORED predicted_token_ids directly
             # -- never by re-tokenizing predicted_text, which could drift from the exact
             # tokens token_confidences was measured against.
-            full_input_ids, full_weights, prompt_lens = [], [], []
+            full_input_ids, full_weights, full_mm_type, prompt_lens = [], [], [], []
             for (item, _img), prompt in zip(imgs, prompts):
                 p_inputs = processor(text=[prompt], images=[_img], return_tensors="pt", max_pixels=286720)
                 p_ids = p_inputs["input_ids"][0].tolist()
+                # Qwen3-VL's forward() needs mm_token_type_ids (which input_ids positions
+                # are image-placeholder vs text, for M-RoPE) whenever image_grid_thw is
+                # passed -- normally free, since collate_fn/evaluate_and_select_lines pass
+                # the processor's whole output dict through unmodified. This function
+                # reconstructs input_ids by hand (prompt tokens + stored generated token
+                # ids, not a fresh joint processor call), so it must carry this field
+                # through explicitly or the model raises ValueError at forward().
+                p_mm_type = p_inputs.get("mm_token_type_ids")
+                p_mm_type = p_mm_type[0].tolist() if p_mm_type is not None else [0] * len(p_ids)
                 # predicted_token_ids already ends with the EOS token (truncated in
                 # evaluate_and_select_lines to the same length as token_confidences,
                 # which stops collecting one step AFTER EOS is generated) -- do not
@@ -534,6 +543,7 @@ def run_self_distillation_pass(
                 gen_conf = item["token_confidences"]
                 full_input_ids.append(p_ids + gen_ids)
                 full_weights.append([0.0] * len(p_ids) + list(gen_conf))
+                full_mm_type.append(p_mm_type + [0] * len(gen_ids))  # generated tokens are plain text, never image-placeholder
                 prompt_lens.append(len(p_ids))
 
             max_len = max(len(ids) for ids in full_input_ids)
@@ -541,22 +551,29 @@ def run_self_distillation_pass(
             attn_mask = torch.zeros((len(full_input_ids), max_len), dtype=torch.long)
             labels = torch.full((len(full_input_ids), max_len), -100, dtype=torch.long)
             weights = torch.zeros((len(full_input_ids), max_len), dtype=torch.float32)
-            for row, (ids, w, p_len) in enumerate(zip(full_input_ids, full_weights, prompt_lens)):
+            mm_token_type_ids = torch.zeros((len(full_input_ids), max_len), dtype=torch.long)
+            for row, (ids, w, mm, p_len) in enumerate(zip(full_input_ids, full_weights, full_mm_type, prompt_lens)):
                 L = len(ids)
                 input_ids[row, :L] = torch.tensor(ids, dtype=torch.long)
                 attn_mask[row, :L] = 1
                 labels[row, p_len:L] = torch.tensor(ids[p_len:], dtype=torch.long)
                 weights[row, p_len:L] = torch.tensor(w[p_len:], dtype=torch.float32)
+                mm_token_type_ids[row, :L] = torch.tensor(mm, dtype=torch.long)
 
             # Image tensors: reuse the processor's own batching so pixel_values /
             # image_grid_thw come out in the same format the model's forward expects
             # (same call shape as collate_fn / the scoring loop above).
-            img_inputs = processor(images=[img for _item, img in imgs], return_tensors="pt")
+            # max_pixels must match the per-example p_inputs call above -- otherwise this
+            # call could resize images differently and produce a different patch count /
+            # image_grid_thw than what p_len (and mm_token_type_ids) assumed, desyncing
+            # the hand-built input_ids from the actual pixel_values fed to the model.
+            img_inputs = processor(images=[img for _item, img in imgs], return_tensors="pt", max_pixels=286720)
 
             batch = {
                 "input_ids": input_ids.to(device),
                 "attention_mask": attn_mask.to(device),
                 "pixel_values": img_inputs["pixel_values"].to(device),
+                "mm_token_type_ids": mm_token_type_ids.to(device),
             }
             if "image_grid_thw" in img_inputs:
                 batch["image_grid_thw"] = img_inputs["image_grid_thw"].to(device)
