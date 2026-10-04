@@ -82,7 +82,11 @@ def eval_pool_loss(model, processor, items, full_dataset, line_dict, prompt_text
     return run_self_distillation_pass(
         model=model, processor=processor, self_distill_items=items,
         full_dataset=full_dataset, unlabeled_line_dict=line_dict,
-        prompt_text=prompt_text, lr=0.0, batch_size=len(items), epochs=1, seed=seed,
+        # Small, explicit batch size (matches the --self_distill_batch_size default of
+        # 4 used everywhere else) -- NOT len(items). This pass has no gradient
+        # checkpointing of its own, so a single all-8 batch is far more memory-hungry
+        # than the sub-batched production default and isn't representative of it.
+        prompt_text=prompt_text, lr=0.0, batch_size=min(4, len(items)), epochs=1, seed=seed,
     )
 
 
@@ -117,6 +121,22 @@ def main():
                 target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
             ),
         )
+        # Every real training script freezes the vision encoder AFTER the LoRA wrap --
+        # this smoke test must too, or it silently measures a different (and much more
+        # memory-hungry) setup than what actually runs in production. Qwen3-VL's vision
+        # tower can share submodule names (q_proj etc.) with the LLM, so target_modules
+        # above may otherwise attach trainable LoRA adapters inside the vision tower too,
+        # with no gradient checkpointing in this standalone script to offset it -- a
+        # very plausible explanation for a near-total-VRAM OOM on just 8 tiny images.
+        from peft import PeftModel
+        _vlm = model.get_base_model() if isinstance(model, PeftModel) else model
+        _vision_module = getattr(_vlm, "visual", None) or getattr(getattr(_vlm, "model", None), "visual", None)
+        if _vision_module is not None:
+            for param in _vision_module.parameters():
+                param.requires_grad = False
+            print("Vision encoder frozen (matches --freeze_vision_encoder in the real pipeline).")
+        else:
+            print("WARNING: no .visual/.model.visual submodule found -- vision encoder NOT frozen.")
     print(f"Model wrapped as: {type(model).__name__}")
 
     eos_token_id = processor.tokenizer.eos_token_id
@@ -153,7 +173,7 @@ def main():
     run_self_distillation_pass(
         model=model, processor=processor, self_distill_items=items,
         full_dataset=full_dataset, unlabeled_line_dict=line_dict,
-        prompt_text=prompt_text, lr=1e-4, batch_size=len(items), epochs=3, seed=args.seed,
+        prompt_text=prompt_text, lr=1e-4, batch_size=min(4, len(items)), epochs=3, seed=args.seed,
     )
 
     print("\nLoss AFTER training (lr=0, measurement only):")
