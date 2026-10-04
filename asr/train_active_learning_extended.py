@@ -604,6 +604,15 @@ def run_self_distillation_pass(
             n_steps += 1
 
     model.config.use_cache = was_use_cache
+    # A fresh AdamW is created every call (every AL iteration in production); its
+    # momentum/variance buffers and this pass's activation memory won't be released
+    # back to the CUDA caching allocator's free pool on their own. Explicit cleanup
+    # here, same reasoning as the `del trainer, model; torch.cuda.empty_cache(); gc.collect()`
+    # already done at the end of every AL iteration in main().
+    del optimizer
+    gc.collect()
+    torch.cuda.empty_cache()
+
     mean_loss = total_loss / max(1, n_steps)
     print(f"[Self-Distillation] {n_steps} step(s) over {len(items)} pool items, "
           f"mean confidence-weighted loss: {mean_loss:.4f}")
